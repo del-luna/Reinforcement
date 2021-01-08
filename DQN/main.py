@@ -1,6 +1,7 @@
 import gym
 import math
 import random
+from tqdm import tqdm
 import numpy as np
 from collections import namedtuple
 from itertools import count
@@ -16,6 +17,7 @@ import torchvision.transforms as T
 import matplotlib.pyplot as plt
 
 Transition = namedtuple('Transition',('state', 'action', 'next_state', 'reward'))
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class ReplayBuffer:
 
@@ -38,7 +40,7 @@ class ReplayBuffer:
 
 class DQN(nn.Module):
 
-    def __init__(self):
+    def __init__(self, n_actions):
         super(DQN, self).__init__()
         self.conv1 = nn.Conv2d(3, 16, kernel_size=8, stride=4)
         self.conv2 = nn.Conv2d(16, 32, kernel_size=4, stride=2)
@@ -46,12 +48,13 @@ class DQN(nn.Module):
         self.fc = nn.Sequential(
             nn.Linear(9*9*32, 256),
             nn.ReLU(),
-            nn.Linear(256, env.action_space.n),
+            nn.Linear(256, n_actions),
         )
 
     def foward(self, x):
-        x = F.relu(self.conv1)
-        x = F.relu(self.conv2)
+        x = self.conv1(x)
+        x = self.conv2(x)
+        x = F.relu(self.conv2(x))
         x = x.view(x.size(0), -1)
         return self.fc(x)
 
@@ -70,47 +73,116 @@ def get_screen():
     screen = torch.from_numpy(screen)
     return transform(screen).unsqueeze(0).to(device)
 
+def epsilon_greedy(state):
+    global steps_done
+    sample = random.random()
+    eps_threshold = EPS_END + (EPS_START - EPS_END) * \
+        math.exp(-1. * steps_done / EPS_DECAY)
+    steps_done += 1
+    if sample > eps_threshold:
+        with torch.no_grad():
+            import pdb;pdb.set_trace()
+            return model(state).max(1)[1].view(1, 1)
+    else:
+        return torch.tensor([[random.randrange(n_actions)]], device=device, dtype=torch.long)
+
+def plot_trajectory():
+    plt.figure(2)
+    plt.clf()
+    trajectory_t = torch.tensor(trajectory, dtype=torch.float)
+    plt.title('Training...')
+    plt.xlabel('Episode')
+    plt.ylabel('Duration')
+    plt.plot(trajectory_t.numpy())
+    # 100 episodes means
+    if len(trajectory_t) >= 100:
+        means = trajectory_t.unfold(0, 100, 1).mean(1).view(-1)
+        means = torch.cat((torch.zeros(99), means))
+        plt.plot(means.numpy())
+
+    plt.pause(0.001)  #delay
+    if is_ipython:
+        display.clear_output(wait=True)
+        display.display(plt.gcf())
+
+def optimize_model():
+    if len(memory) < BATCH_SIZE:
+        return
+    transitions = memory.sample(BATCH_SIZE)
+    batch = Transition(*zip(*transitions))
+
+    non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
+                                          batch.next_state)), device=device, dtype=torch.bool)
+    non_final_next_states = torch.cat([s for s in batch.next_state
+                                                if s is not None])
+    state_batch = torch.cat(batch.state)
+    action_batch = torch.cat(batch.action)
+    reward_batch = torch.cat(batch.reward)
+    import pdb;pdb.set_trace()
+    state_action_values = model(state_batch).gather(1, action_batch)
+    next_state_values = torch.zeros(BATCH_SIZE, device=device)
+    
+    with torch.no_grad():
+        next_state_values[non_final_mask] = model(non_final_next_states).max(1)[0].detach()
+    expected_state_action_values = (next_state_values * GAMMA) + reward_batch
+    
+    loss = F.smooth_l1_loss(state_action_values, expected_state_action_values.unsqueeze(1))
+    optimizer.zero_grad()
+    loss.backward()
+    optimizer.step()
+
 if __name__ == "__main__":
 
-    batch_size = 32
-    gamma = 0.99
-    loss_list = []
-    reward_list = []
-    episode_reward = 0
-
+    BATCH_SIZE = 32
+    GAMMA = 0.999
+    EPS_START = 1.
+    EPS_END = 0.1
+    EPS_DECAY = 200
     env = gym.make('BreakoutDeterministic-v4')
-    model = DQN()
-    if torch.cuda.is_availabe():
-        model = model.cuda()
-    optimizer = optim.Adam(model.parameters())
-    replay_buffer = ReplayBuffer(1000)
-    epsilon_start = 1.0
-    epsilon_final = 0.01
-    epsilon_decay = 30000
-    epsilon_by_frame = lambda frame_idx: epsilon_final + (epsilon_start - epsilon_final) * math.exp(-1. * frame_idx / epsilon_decay)
+    env.reset()
+    trajectory = []
+    init_screen = get_screen()
+    _, _, screen_height, screen_width = init_screen.shape
+    n_actions = env.action_space.n
 
-    observe = env.reset()
-    state = preprocess(observe)
-    history = np.stack((state, state, state, state), axis=2)
-    history = np.reshape([history], (1, 84, 84, 4))
+    transform = T.Compose([T.ToPILImage(),
+                       T.ToTensor()])
 
-    for frame_idx in range(1, 100001):
-        epsilon = epsilon_by_frame(frame_idx)
-        action = model.act(history, epsilon)
-        next_state, reward, done, _ = env.step(action)
-        replay_buffer.push(state, action, reward, next_state, done)
+    model = DQN(n_actions)
+    model.to(device)
+    optimizer = optim.RMSprop(model.parameters())
+    memory = ReplayBuffer(10000)
 
-        state = next_state
-        episode_reward += reward
+    steps_done = 0
+    num_episodes = 300
+    for i_episodes in tqdm(range(num_episodes)):
+        env.reset()
+        last_screen = get_screen()
+        current_screen = get_screen()
+        state = current_screen - last_screen
 
-        if done:
-            state = env.reset()
-            reward_list.append(episode_reward)
-            episode_reward = 0
-        
-        if len(reaply_buffer) > batch_size:
-            loss = temporal_difference(batch_size)
-            loss_list.append(loss.data[0])
+        for t in count():
+            action = epsilon_greedy(state)
+            _, reward, done, _ = env.step(action.item())
+            reward = torch.tensor([reward], device=device)
 
-        if frame_idx % 200 == 0:
-            plot(frame_idx, reward_list, loss_list)
+            last_screen = current_screen
+            current_screen = get_screen()
+            if not done:
+                next_state = current_screen - last_screen
+            else:
+                next_state = None
+            
+            memory.push(state, action, next_state, reward)
+            state = next_state
+            optimize_model()
+            if done:
+                trajectory.append(t + 1)
+                plot_trajectory()
+                break
+
+    print('Complete')
+    env.render()
+    env.close()
+    plt.ioff()
+    plt.show()
