@@ -14,7 +14,12 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 import torchvision.transforms as T
+import matplotlib
 import matplotlib.pyplot as plt
+
+is_ipython = 'inline' in matplotlib.get_backend()
+if is_ipython:
+    from IPython import display
 
 Transition = namedtuple('Transition',('state', 'action', 'next_state', 'reward'))
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -39,7 +44,7 @@ class ReplayBuffer:
         return len(self.memory)
 
 class DQN(nn.Module):
-
+    
     def __init__(self, n_actions):
         super(DQN, self).__init__()
         self.conv1 = nn.Conv2d(3, 16, kernel_size=8, stride=4)
@@ -51,9 +56,8 @@ class DQN(nn.Module):
             nn.Linear(256, n_actions),
         )
 
-    def foward(self, x):
-        x = self.conv1(x)
-        x = self.conv2(x)
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
         x = F.relu(self.conv2(x))
         x = x.view(x.size(0), -1)
         return self.fc(x)
@@ -182,7 +186,7 @@ if __name__ == "__main__":
                 break
 
     print('Complete')
-    env.render()
+    env.render(mode='rgb_array')
     env.close()
     plt.ioff()
     plt.show()
